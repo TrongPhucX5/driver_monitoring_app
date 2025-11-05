@@ -5,13 +5,7 @@
 - Cài đặt (chọn camera index hoặc URL)
 - Nhãn trạng thái
 
-Yêu cầu: PyQt5, opencv-python, numpy
-Chạy: pip install pyqt5 opencv-python numpy
-       python video_monitor.py
-
-Tệp: video_monitor.py
 """
-
 import sys
 import threading
 import cv2

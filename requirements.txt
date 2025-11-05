@@ -1,4 +1,5 @@
+PyQt5
 opencv-python
 numpy
 customtkinter
-playsound
+playsound==1.2.2
