@@ -7,7 +7,8 @@ import cv2
 import numpy as np
 from datetime import datetime
 import time
-
+from modules.sound import SoundModule
+from modules.email_alert import send_alert_email
 
 class CameraModule:
     """Module xử lý camera và nhận diện khuôn mặt"""
@@ -272,6 +273,72 @@ if __name__ == "__main__":
                 
                 if data and data['alert_level'] > 0:
                     print(f"⚠️  Alert: {data['alert_type']} - Level: {data['alert_level']}")
+            
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        
+        camera.release()
+    else:
+        print("❌ Không thể khởi động camera")
+
+
+
+        # Test code
+if __name__ == "__main__":
+    print("Testing Camera Module...")
+    camera = CameraModule()
+    
+    # Khởi tạo module âm thanh
+    sound = SoundModule()
+
+    # Cấu hình email người nhận
+    RECIPIENT_EMAIL = "manager-email@example.com" # Thay bằng email quản lý
+
+    # Biến theo dõi cooldown để tránh spam
+    SOUND_COOLDOWN = 5  # Giây - 5 giây phát âm thanh 1 lần
+    EMAIL_COOLDOWN = 300 # Giây - 5 phút gửi email 1 lần
+    
+    last_sound_alert = 0
+    last_email_alert = 0
+    
+    if camera.start_camera():
+        print("Nhấn 'q' để thoát")
+        
+        while True:
+            frame, data = camera.get_frame()
+            
+            if frame is not None:
+                cv2.imshow('Driver Monitor Test', frame)
+                
+                # ---- TÍCH HỢP CẢNH BÁO ----
+                current_time = time.time()
+                
+                if data and data['alert_level'] > 0:
+                    # 1. Cảnh báo Âm thanh (bất kỳ cảnh báo nào)
+                    if (current_time - last_sound_alert) > SOUND_COOLDOWN:
+                        print("🔊 Kích hoạt cảnh báo âm thanh...")
+                        try:
+                            # Chạy âm thanh ở thread riêng để không block
+                            # (Nếu playsound bị treo, cần dùng thư viện khác như pygame.mixer)
+                            # Đơn giản nhất là gọi trực tiếp:
+                            sound.play_sound() 
+                        except Exception as e:
+                            print(f"Lỗi phát âm thanh: {e}")
+                        last_sound_alert = current_time
+
+                    # 2. Cảnh báo Email (chỉ khi nguy hiểm cấp 2)
+                    if data['alert_level'] == 2 and (current_time - last_email_alert) > EMAIL_COOLDOWN:
+                        print("📧 Kích hoạt gửi email cảnh báo...")
+                        subject = f"[NGUY HIỂM] Tài xế có dấu hiệu ngủ gật!"
+                        body = (
+                            f"Phát hiện tài xế có dấu hiệu nguy hiểm (mã: {data['alert_type']})\n"
+                            f"Vào lúc: {data['timestamp']}\n"
+                            f"Vui lòng kiểm tra ngay lập tức."
+                        )
+                        # Gửi email (hàm này đã chạy nền, không cần thread)
+                        send_alert_email(RECIPIENT_EMAIL, subject, body)
+                        last_email_alert = current_time
+                # -----------------------------
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
