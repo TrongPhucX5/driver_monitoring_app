@@ -3,3 +3,4 @@ opencv-python
 numpy
 customtkinter
 playsound==1.2.2
+PySide6
