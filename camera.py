@@ -3,346 +3,461 @@ Camera Module - Nhận diện khuôn mặt, mắt, miệng
 Sử dụng OpenCV Haar Cascades
 """
 
+import sys
 import cv2
-import numpy as np
-from datetime import datetime
-import time
-from modules.sound import SoundModule
-from modules.email_alert import send_alert_email
+from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, 
+    QHBoxLayout, QLabel, QPushButton, QFrame, QStackedWidget,
+    QFormLayout, QSpacerItem, QSizePolicy,
+    QSlider, QComboBox, QSpinBox  # <-- THÊM QSpinBox
+)
 
-class CameraModule:
-    """Module xử lý camera và nhận diện khuôn mặt"""
-    
+# --- Class VideoThread (Không thay đổi, giữ nguyên) ---
+class VideoThread(QThread):
+    change_pixmap_signal = Signal(QImage)
+    def __init__(self, source=0):
+        super().__init__()
+        self._run_flag = True
+        self.source = source
+    def run(self):
+        cap = cv2.VideoCapture(self.source)
+        while self._run_flag and cap.isOpened():
+            ret, frame = cap.read()
+            if ret:
+                rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_image.shape
+                bytes_per_line = ch * w
+                convert_to_Qt_format = QImage(
+                    rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
+                )
+                self.change_pixmap_signal.emit(convert_to_Qt_format)
+        cap.release()
+    def stop(self):
+        self._run_flag = False
+        self.wait()
+# --- Hết class VideoThread ---
+
+
+# --- Cửa sổ chính (Được cập nhật) ---
+class MainWindow(QMainWindow):
     def __init__(self):
-        # Khởi tạo các Haar Cascade classifiers
-        self.face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        super().__init__()
+        self.setWindowTitle("Hệ thống Giám sát Lái xe")
+        self.setGeometry(100, 100, 1024, 768)
+        self.video_thread = None
+
+        self.initUI()
+        self.apply_styles()
+        self.show_monitoring_page()
+
+    def initUI(self):
+        central_widget = QWidget(self)
+        self.setCentralWidget(central_widget)
+
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # --- 1. Sidebar (Menu bên trái) ---
+        sidebar = QWidget()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(200)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(10, 20, 10, 20)
+        sidebar_layout.setSpacing(15)
+
+        title_label = QLabel("Giám sát Lái xe")
+        title_label.setObjectName("SidebarTitle")
+        
+        self.menu_giam_sat = QPushButton("Giám sát")
+        self.menu_giam_sat.setCursor(Qt.CursorShape.PointingHandCursor) # <-- SỬA LỖI CURSOR
+        
+        self.menu_tai_khoan = QPushButton("Tài khoản")
+        self.menu_tai_khoan.setObjectName("MenuButton")
+        self.menu_tai_khoan.setEnabled(False) 
+        
+        self.btn_cai_dat = QPushButton("Cài đặt cá nhân")
+        self.btn_cai_dat.setToolTip("Tùy chỉnh âm thanh và ngưỡng cảnh báo") # Cập nhật tooltip
+        self.btn_cai_dat.setObjectName("SettingsButton_Unselected") 
+        self.btn_cai_dat.setCursor(Qt.CursorShape.PointingHandCursor) # <-- SỬA LỖI CURSOR
+
+        sidebar_layout.addWidget(title_label)
+        sidebar_layout.addSpacing(20)
+        sidebar_layout.addWidget(self.menu_giam_sat)
+        sidebar_layout.addWidget(self.menu_tai_khoan)
+        sidebar_layout.addStretch()
+        sidebar_layout.addWidget(self.btn_cai_dat)
+        
+        main_layout.addWidget(sidebar)
+
+        # --- 2. Main Area (Khu vực nội dung) ---
+        main_area = QWidget()
+        main_area.setObjectName("MainArea")
+        main_area_layout = QVBoxLayout(main_area)
+        main_area_layout.setContentsMargins(20, 20, 20, 10)
+        main_area_layout.setSpacing(10)
+
+        self.stacked_widget = QStackedWidget()
+        
+        monitoring_page = self.create_monitoring_page() # Index 0
+        settings_page = self.create_settings_page()     # Index 1
+
+        self.stacked_widget.addWidget(monitoring_page)
+        self.stacked_widget.addWidget(settings_page)
+
+        main_area_layout.addWidget(self.stacked_widget) 
+
+        self.status_bar_label = QLabel("Trạng thái: Idle (User: GX6dYP8C63db3jEVACfvmw3uJDH2)")
+        self.status_bar_label.setObjectName("StatusBar")
+        self.status_bar_label.setFixedHeight(25)
+        
+        main_area_layout.addWidget(self.status_bar_label)
+        main_layout.addWidget(main_area, 1)
+
+        self.btn_bat_dau.clicked.connect(self.start_video)
+        self.btn_dung_lai.clicked.connect(self.stop_video)
+        self.menu_giam_sat.clicked.connect(self.show_monitoring_page)
+        self.btn_cai_dat.clicked.connect(self.show_settings_page)
+
+    def create_monitoring_page(self):
+        page_widget = QWidget()
+        layout = QVBoxLayout(page_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        self.video_label = QLabel("No video")
+        self.video_label.setObjectName("VideoLabel")
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setMinimumSize(640, 480)
+        layout.addWidget(self.video_label, 1)
+        control_layout = QHBoxLayout()
+        
+        self.btn_bat_dau = QPushButton("BẮT ĐẦU GIÁM SÁT")
+        self.btn_bat_dau.setObjectName("StartButton")
+        self.btn_bat_dau.setCursor(Qt.CursorShape.PointingHandCursor) # <-- SỬA LỖI CURSOR
+
+        self.btn_dung_lai = QPushButton("DỪNG LẠI")
+        self.btn_dung_lai.setObjectName("StopButton")
+        self.btn_dung_lai.setEnabled(False)
+        self.btn_dung_lai.setCursor(Qt.CursorShape.PointingHandCursor) # <-- SỬA LỖI CURSOR
+
+        control_layout.addStretch()
+        control_layout.addWidget(self.btn_bat_dau)
+        control_layout.addWidget(self.btn_dung_lai)
+        control_layout.addStretch()
+        layout.addLayout(control_layout)
+        return page_widget
+
+    # *** THAY ĐỔI: HÀM NÀY ĐÃ ĐƯỢC CẬP NHẬT ***
+    def create_settings_page(self):
+        """Tạo widget cho trang Cài đặt cá nhân"""
+        page_widget = QWidget()
+        main_layout = QVBoxLayout(page_widget)
+        main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        form_container = QWidget()
+        form_container.setObjectName("FormContainer")
+        form_container.setMaximumWidth(500)
+        form_layout = QVBoxLayout(form_container)
+        
+        title = QLabel("Cài đặt cá nhân")
+        title.setObjectName("FormTitle")
+        
+        settings_form = QFormLayout()
+        settings_form.setSpacing(15) # Giảm khoảng cách một chút
+
+        # 1. Âm thanh
+        self.audio_alert_combo = QComboBox()
+        self.audio_alert_combo.addItems(["Tiếng Bíp (Mặc định)", "Giọng nói cảnh báo", "Tắt âm thanh"])
+        self.audio_alert_combo.setCursor(Qt.CursorShape.PointingHandCursor) # <-- SỬA LỖI CURSOR
+        settings_form.addRow(QLabel("Âm thanh cảnh báo:"), self.audio_alert_combo)
+
+        # 2. Độ nhạy (từ code bạn cung cấp)
+        self.sensitivity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.sensitivity_slider.setRange(1, 10)
+        self.sensitivity_slider.setValue(5)
+        self.sensitivity_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.sensitivity_slider.setTickInterval(1)
+        self.sensitivity_slider.setCursor(Qt.CursorShape.PointingHandCursor) # <-- SỬA LỖI CURSOR
+        settings_form.addRow(QLabel("Độ nhạy chung:"), self.sensitivity_slider)
+        
+        # --- THÊM CÁC NGƯỠNG KÍCH HOẠT ---
+        
+        # 3. Ngưỡng ngáp
+        self.yawn_threshold_spinbox = QSpinBox()
+        self.yawn_threshold_spinbox.setRange(1, 10) # Cho phép 1-10 lần ngáp
+        self.yawn_threshold_spinbox.setValue(3)     # Mặc định là 3
+        self.yawn_threshold_spinbox.setSuffix(" lần")
+        self.yawn_threshold_spinbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings_form.addRow(QLabel("Ngưỡng ngáp:"), self.yawn_threshold_spinbox)
+        
+        # 4. Ngưỡng nhắm mắt
+        self.eye_time_spinbox = QSpinBox()
+        self.eye_time_spinbox.setRange(1, 10) # Cho phép 1-10 giây
+        self.eye_time_spinbox.setValue(2)     # Mặc định là 2 giây
+        self.eye_time_spinbox.setSuffix(" giây")
+        self.eye_time_spinbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings_form.addRow(QLabel("Nhắm mắt quá:"), self.eye_time_spinbox)
+        
+        # 5. Ngưỡng nghiêng đầu
+        self.head_angle_spinbox = QSpinBox()
+        self.head_angle_spinbox.setRange(10, 45) # 10-45 độ
+        self.head_angle_spinbox.setValue(20)     # Mặc định 20 độ
+        self.head_angle_spinbox.setSuffix(" độ")
+        self.head_angle_spinbox.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings_form.addRow(QLabel("Đầu nghiêng quá:"), self.head_angle_spinbox)
+
+        # Nút Lưu
+        btn_save = QPushButton("LƯU CÀI ĐẶT")
+        btn_save.setObjectName("StartButton")
+        btn_save.setCursor(Qt.CursorShape.PointingHandCursor) # <-- SỬA LỖI CURSOR
+
+        form_layout.addWidget(title)
+        form_layout.addLayout(settings_form)
+        form_layout.addSpacing(20)
+        form_layout.addWidget(btn_save, alignment=Qt.AlignmentFlag.AlignCenter)
+        main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        main_layout.addWidget(form_container)
+        main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        
+        return page_widget
+
+    # --- Các hàm chuyển trang (Không thay đổi) ---
+    @Slot()
+    def show_monitoring_page(self):
+        self.stacked_widget.setCurrentIndex(0) 
+        self.menu_giam_sat.setObjectName("SelectedMenuButton")
+        self.btn_cai_dat.setObjectName("SettingsButton_Unselected")
+        self.refresh_styles() 
+
+    @Slot()
+    def show_settings_page(self):
+        self.stacked_widget.setCurrentIndex(1) 
+        self.menu_giam_sat.setObjectName("MenuButton")
+        self.btn_cai_dat.setObjectName("SettingsButton_Selected")
+        self.refresh_styles()
+
+    def refresh_styles(self):
+        self.style().unpolish(self.menu_giam_sat)
+        self.style().polish(self.menu_giam_sat)
+        self.style().unpolish(self.btn_cai_dat)
+        self.style().polish(self.btn_cai_dat)
+
+    # --- Các hàm xử lý video (Không thay đổi) ---
+    @Slot()
+    def start_video(self):
+        if self.video_thread is not None:
+            self.video_thread.stop()
+        self.video_thread = VideoThread(source=0) 
+        self.video_thread.change_pixmap_signal.connect(self.update_image)
+        self.video_thread.start()
+        self.btn_bat_dau.setEnabled(False)
+        self.btn_dung_lai.setEnabled(True)
+        self.video_label.setText("")
+
+    @Slot()
+    def stop_video(self):
+        if self.video_thread:
+            self.video_thread.stop()
+            self.video_thread = None
+        self.btn_bat_dau.setEnabled(True)
+        self.btn_dung_lai.setEnabled(False)
+        self.video_label.setText("No video")
+
+    @Slot(QImage)
+    def update_image(self, qt_img):
+        pixmap = QPixmap.fromImage(qt_img).scaled(
+            self.video_label.size(), 
+            Qt.AspectRatioMode.KeepAspectRatio, 
+            Qt.TransformationMode.SmoothTransformation
         )
-        self.eye_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + 'haarcascade_eye.xml'
-        )
-        
-        # Camera object
-        self.cap = None
-        self.is_running = False
-        
-        # Tracking variables cho cảnh báo
-        self.closed_eyes_frames = 0
-        self.no_face_frames = 0
-        self.ALERT_THRESHOLD = 20  # 20 frames liên tiếp (~0.67 giây ở 30fps)
-        
-        # Statistics
-        self.total_frames = 0
-        self.alert_count = 0
-        
-    def start_camera(self, camera_id=0):
-        """
-        Khởi động camera
-        Args:
-            camera_id: ID của camera (0 là camera mặc định)
-        Returns:
-            bool: True nếu khởi động thành công
-        """
-        try:
-            self.cap = cv2.VideoCapture(camera_id)
-            
-            if not self.cap.isOpened():
-                print(f"Không thể mở camera ID: {camera_id}")
-                return False
-            
-            # Cấu hình camera
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
-            
-            self.is_running = True
-            print("✓ Camera đã sẵn sàng")
-            return True
-            
-        except Exception as e:
-            print(f"Lỗi khởi động camera: {str(e)}")
-            return False
-    
-    def detect_features(self, frame):
-        """
-        Phát hiện khuôn mặt, mắt và đánh giá trạng thái
-        Args:
-            frame: Frame từ camera (numpy array)
-        Returns:
-            tuple: (processed_frame, detection_data)
-        """
-        if frame is None:
-            return None, None
-        
-        # Chuyển sang grayscale để xử lý nhanh hơn
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Phát hiện khuôn mặt
-        faces = self.face_cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(80, 80),
-            flags=cv2.CASCADE_SCALE_IMAGE
-        )
-        
-        # Khởi tạo dữ liệu phát hiện
-        detection_data = {
-            'faces': len(faces),
-            'eyes': 0,
-            'alert_type': None,  # None, 'no_face', 'closed_eyes', 'drowsy'
-            'alert_level': 0,  # 0: OK, 1: Warning, 2: Danger
-            'timestamp': datetime.now(),
-            'frame_number': self.total_frames
-        }
-        
-        # Xử lý từng khuôn mặt
-        for (x, y, w, h) in faces:
-            # Vẽ hình chữ nhật cho khuôn mặt
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            cv2.putText(frame, 'Face', (x, y-10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            
-            # ROI (Region of Interest) cho mắt
-            roi_gray = gray[y:y+h, x:x+w]
-            roi_color = frame[y:y+h, x:x+w]
-            
-            # Phát hiện mắt
-            eyes = self.eye_cascade.detectMultiScale(
-                roi_gray,
-                scaleFactor=1.1,
-                minNeighbors=10,
-                minSize=(20, 20)
-            )
-            
-            detection_data['eyes'] += len(eyes)
-            
-            # Vẽ hình chữ nhật cho mắt
-            for (ex, ey, ew, eh) in eyes:
-                cv2.rectangle(roi_color, (ex, ey), (ex+ew, ey+eh), (255, 0, 0), 2)
-                cv2.putText(roi_color, 'Eye', (ex, ey-5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
-            
-            # Phát hiện vùng miệng (dưới nửa khuôn mặt)
-            mouth_roi_y = int(h * 0.6)
-            mouth_roi = roi_color[mouth_roi_y:h, :]
-            
-            # Vẽ vùng miệng đơn giản
-            mouth_x = int(w * 0.3)
-            mouth_y = mouth_roi_y + int(h * 0.1)
-            mouth_w = int(w * 0.4)
-            mouth_h = int(h * 0.15)
-            cv2.rectangle(roi_color, 
-                         (mouth_x, mouth_y), 
-                         (mouth_x + mouth_w, mouth_y + mouth_h), 
-                         (0, 0, 255), 2)
-            cv2.putText(roi_color, 'Mouth', (mouth_x, mouth_y-5),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-        
-        # Đánh giá trạng thái và cảnh báo
-        detection_data = self._evaluate_driver_state(detection_data)
-        
-        # Vẽ trạng thái lên frame
-        self._draw_status(frame, detection_data)
-        
-        self.total_frames += 1
-        return frame, detection_data
-    
-    def _evaluate_driver_state(self, data):
-        """
-        Đánh giá trạng thái tài xế dựa trên dữ liệu phát hiện
-        """
-        # Không phát hiện khuôn mặt
-        if data['faces'] == 0:
-            self.no_face_frames += 1
-            self.closed_eyes_frames = 0
-            
-            if self.no_face_frames > self.ALERT_THRESHOLD:
-                data['alert_type'] = 'no_face'
-                data['alert_level'] = 2
-                self.alert_count += 1
-            elif self.no_face_frames > self.ALERT_THRESHOLD // 2:
-                data['alert_type'] = 'no_face'
-                data['alert_level'] = 1
-        
-        # Phát hiện khuôn mặt nhưng không có mắt (mắt đóng)
-        elif data['faces'] > 0 and data['eyes'] < 2:
-            self.closed_eyes_frames += 1
-            self.no_face_frames = 0
-            
-            if self.closed_eyes_frames > self.ALERT_THRESHOLD:
-                data['alert_type'] = 'closed_eyes'
-                data['alert_level'] = 2
-                self.alert_count += 1
-            elif self.closed_eyes_frames > self.ALERT_THRESHOLD // 2:
-                data['alert_type'] = 'drowsy'
-                data['alert_level'] = 1
-        
-        # Trạng thái bình thường
-        else:
-            self.closed_eyes_frames = 0
-            self.no_face_frames = 0
-            data['alert_level'] = 0
-        
-        return data
-    
-    def _draw_status(self, frame, data):
-        """Vẽ thông tin trạng thái lên frame"""
-        h, w = frame.shape[:2]
-        
-        # Background cho text
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (w, 120), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-        
-        # Thông tin cơ bản
-        cv2.putText(frame, f"Khuon mat: {data['faces']}", (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(frame, f"Mat: {data['eyes']}", (10, 60),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(frame, f"Frames: {self.total_frames}", (10, 90),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
-        
-        # Cảnh báo
-        if data['alert_level'] > 0:
-            alert_messages = {
-                'no_face': 'CANH BAO: Khong phat hien tai xe!',
-                'closed_eyes': 'NGUY HIEM: Tai xe dang ngu gat!',
-                'drowsy': 'CHU Y: Tai xe co dau hieu buon ngu'
+        self.video_label.setPixmap(pixmap)
+
+    def closeEvent(self, event):
+        self.stop_video()
+        event.accept()
+
+    def apply_styles(self):
+        # *** THAY ĐỔI: ĐÃ XÓA TẤT CẢ 'cursor:' KHỎI QSS ***
+        style_sheet = """
+            /* Nền chung */
+            QWidget {
+                background-color: #2c3e50;
+                color: #ecf0f1;
+                font-family: Arial;
+            }
+
+            /* --- Sidebar --- */
+            QWidget#Sidebar {
+                background-color: #34495e;
+            }
+            QLabel#SidebarTitle {
+                font-size: 16px;
+                font-weight: bold;
+                color: white;
+            }
+            QPushButton#MenuButton {
+                background-color: transparent;
+                color: #bdc3c7;
+                border: none;
+                padding: 10px;
+                text-align: left;
+                font-size: 14px;
+            }
+            QPushButton#MenuButton:hover {
+                background-color: #405a74;
+            }
+            QPushButton#MenuButton:disabled {
+                color: #7f8c8d;
+                background-color: transparent;
             }
             
-            message = alert_messages.get(data['alert_type'], 'CANH BAO!')
-            color = (0, 0, 255) if data['alert_level'] == 2 else (0, 165, 255)
+            QPushButton#SelectedMenuButton {
+                background-color: #1abc9c;
+                color: white;
+                border: none;
+                padding: 10px;
+                text-align: left;
+                font-size: 14px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QPushButton#SettingsButton_Unselected {
+                background-color: transparent;
+                color: #bdc3c7;
+                font-weight: bold;
+                padding: 12px 5px;
+                border-radius: 5px;
+                font-size: 13px;
+                border: 1px solid #7f8c8d;
+            }
+            QPushButton#SettingsButton_Unselected:hover {
+                background-color: #405a74;
+            }
+            QPushButton#SettingsButton_Selected {
+                background-color: #1abc9c;
+                color: white;
+                font-weight: bold;
+                padding: 12px 5px;
+                border-radius: 5px;
+                font-size: 13px;
+                border: none;
+            }
+
+            /* --- Main Area --- */
+            QWidget#MainArea {
+                background-color: #2c3e50;
+            }
+            QLabel#VideoLabel {
+                background-color: black;
+                color: #7f8c8d;
+                font-size: 24px;
+                border-radius: 5px;
+            }
+            QPushButton#StartButton {
+                background-color: #1abc9c;
+                color: white;
+                font-weight: bold;
+                padding: 12px 20px;
+                border-radius: 5px;
+                font-size: 13px;
+                min-width: 150px;
+            }
+            QPushButton#StartButton:hover {
+                background-color: #16a085;
+            }
+            QPushButton#StopButton {
+                background-color: #e74c3c;
+                color: white;
+                font-weight: bold;
+                padding: 12px 20px;
+                border-radius: 5px;
+                font-size: 13px;
+                min-width: 150px;
+            }
+            QPushButton#StopButton:hover {
+                background-color: #c0392b;
+            }
+            QPushButton#StopButton:disabled {
+                background-color: #7f8c8d;
+                color: #bdc3c7;
+            }
             
-            # Cảnh báo nổi bật
-            cv2.rectangle(frame, (0, h-80), (w, h), color, -1)
-            cv2.putText(frame, message, (w//2 - 250, h-40),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+            QLabel#StatusBar {
+                color: #95a5a6;
+                font-size: 11px;
+            }
             
-            # Biểu tượng cảnh báo
-            cv2.circle(frame, (50, h-40), 25, (255, 255, 255), -1)
-            cv2.putText(frame, '!', (43, h-25),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.5, color, 3)
-    
-    def get_frame(self):
+            /* --- Trang Cài đặt (Form) --- */
+            QWidget#FormContainer {
+                background-color: #34495e;
+                border-radius: 8px;
+                padding: 20px;
+            }
+            QLabel#FormTitle {
+                font-size: 18px;
+                font-weight: bold;
+                color: #1abc9c;
+                margin-bottom: 10px;
+                text-align: center;
+            }
+            QWidget#FormContainer QLabel {
+                font-size: 14px;
+                color: #ecf0f1;
+            }
+            
+            /* Style cho QComboBox, QSlider, QSpinBox */
+            QComboBox {
+                background-color: #2c3e50;
+                border: 1px solid #7f8c8d;
+                padding: 8px;
+                border-radius: 4px;
+                font-size: 14px;
+                color: white;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #34495e;
+                border: 1px solid #7f8c8d;
+                selection-background-color: #1abc9c;
+            }
+            
+            QSpinBox {
+                background-color: #2c3e50;
+                border: 1px solid #7f8c8d;
+                padding: 8px;
+                border-radius: 4px;
+                font-size: 14px;
+                color: white;
+            }
+
+            QSlider::groove:horizontal {
+                border: 1px solid #7f8c8d;
+                height: 8px;
+                background: #2c3e50;
+                margin: 2px 0;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #1abc9c;
+                border: 1px solid #1abc9c;
+                width: 18px;
+                margin: -5px 0;
+                border-radius: 9px;
+            }
+            QSlider::tick:horizontal {
+                height: 10px;
+                width: 2px;
+                background: #7f8c8d;
+                margin-top: 1px;
+            }
         """
-        Lấy frame hiện tại từ camera và xử lý
-        Returns:
-            tuple: (processed_frame, detection_data)
-        """
-        if not self.is_running or self.cap is None:
-            return None, None
-        
-        ret, frame = self.cap.read()
-        if not ret:
-            print("Không thể đọc frame từ camera")
-            return None, None
-        
-        return self.detect_features(frame)
-    
-    def get_statistics(self):
-        """Lấy thống kê"""
-        return {
-            'total_frames': self.total_frames,
-            'alert_count': self.alert_count,
-            'uptime': time.time()
-        }
-    
-    def release(self):
-        """Giải phóng tài nguyên camera"""
-        self.is_running = False
-        if self.cap is not None:
-            self.cap.release()
-        cv2.destroyAllWindows()
-        print("✓ Đã dừng camera")
+        self.setStyleSheet(style_sheet)
 
 
-# Test code
+# --- Chạy ứng dụng ---
 if __name__ == "__main__":
-    print("Testing Camera Module...")
-    camera = CameraModule()
-    
-    if camera.start_camera():
-        print("Nhấn 'q' để thoát")
-        
-        while True:
-            frame, data = camera.get_frame()
-            
-            if frame is not None:
-                cv2.imshow('Driver Monitor Test', frame)
-                
-                if data and data['alert_level'] > 0:
-                    print(f"⚠️  Alert: {data['alert_type']} - Level: {data['alert_level']}")
-            
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-        
-        camera.release()
-    else:
-        print("❌ Không thể khởi động camera")
-
-
-
-        # Test code
-if __name__ == "__main__":
-    print("Testing Camera Module...")
-    camera = CameraModule()
-    
-    # Khởi tạo module âm thanh
-    sound = SoundModule()
-
-    # Cấu hình email người nhận
-    RECIPIENT_EMAIL = "manager-email@example.com" # Thay bằng email quản lý
-
-    # Biến theo dõi cooldown để tránh spam
-    SOUND_COOLDOWN = 5  # Giây - 5 giây phát âm thanh 1 lần
-    EMAIL_COOLDOWN = 300 # Giây - 5 phút gửi email 1 lần
-    
-    last_sound_alert = 0
-    last_email_alert = 0
-    
-    if camera.start_camera():
-        print("Nhấn 'q' để thoát")
-        
-        while True:
-            frame, data = camera.get_frame()
-            
-            if frame is not None:
-                cv2.imshow('Driver Monitor Test', frame)
-                
-                # ---- TÍCH HỢP CẢNH BÁO ----
-                current_time = time.time()
-                
-                if data and data['alert_level'] > 0:
-                    # 1. Cảnh báo Âm thanh (bất kỳ cảnh báo nào)
-                    if (current_time - last_sound_alert) > SOUND_COOLDOWN:
-                        print("🔊 Kích hoạt cảnh báo âm thanh...")
-                        try:
-                            # Chạy âm thanh ở thread riêng để không block
-                            # (Nếu playsound bị treo, cần dùng thư viện khác như pygame.mixer)
-                            # Đơn giản nhất là gọi trực tiếp:
-                            sound.play_sound() 
-                        except Exception as e:
-                            print(f"Lỗi phát âm thanh: {e}")
-                        last_sound_alert = current_time
-
-                    # 2. Cảnh báo Email (chỉ khi nguy hiểm cấp 2)
-                    if data['alert_level'] == 2 and (current_time - last_email_alert) > EMAIL_COOLDOWN:
-                        print("📧 Kích hoạt gửi email cảnh báo...")
-                        subject = f"[NGUY HIỂM] Tài xế có dấu hiệu ngủ gật!"
-                        body = (
-                            f"Phát hiện tài xế có dấu hiệu nguy hiểm (mã: {data['alert_type']})\n"
-                            f"Vào lúc: {data['timestamp']}\n"
-                            f"Vui lòng kiểm tra ngay lập tức."
-                        )
-                        # Gửi email (hàm này đã chạy nền, không cần thread)
-                        send_alert_email(RECIPIENT_EMAIL, subject, body)
-                        last_email_alert = current_time
-                # -----------------------------
-            
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-        
-        camera.release()
-    else:
-        print("❌ Không thể khởi động camera")
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
