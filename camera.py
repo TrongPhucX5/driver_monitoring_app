@@ -7,13 +7,14 @@ import sys
 import cv2
 import time  # --- MỚI ---: Cần để theo dõi thời gian (nhắm mắt, ngáp)
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+# --- CẬP NHẬT IMPORT ---
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer 
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QFrame, QStackedWidget,
     QFormLayout, QSpacerItem, QSizePolicy,
-    QSlider, QComboBox, QSpinBox
+    QSlider, QComboBox, QSpinBox, QCheckBox # <-- THÊM QCheckBox
 )
 
 # --- MỚI ---: Import FaceProcessor từ file face_processor.py
@@ -21,7 +22,8 @@ try:
     from modules.face_processor import FaceProcessor
 except ImportError:
     print("Lỗi: Không tìm thấy file 'face_processor.py'.")
-    print("Hãy đảm bảo file đó nằm cùng thư mục với 'camera.py'.")
+    print("Hãy đảm bảo bạn có file 'modules/__init__.py' (có thể rỗng)")
+    print("và file 'modules/face_processor.py'.")
     sys.exit(1)
 
 
@@ -92,12 +94,15 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1024, 768)
         self.video_thread = None
 
+        # --- MỚI ---: Thêm biến trạng thái giao diện
+        self.current_theme = "dark" # Bắt đầu với theme tối
+
         # --- MỚI ---: Khởi tạo các biến cấu hình và trạng thái
         self.init_config_vars()
         self.init_state_vars()
 
         self.initUI()
-        self.apply_styles()
+        self.apply_styles() # <-- Sẽ áp dụng theme "dark" mặc định
         self.show_monitoring_page()
 
     # --- MỚI ---: Hàm khởi tạo các biến CẤU HÌNH (settings)
@@ -105,18 +110,15 @@ class MainWindow(QMainWindow):
         """Lưu trữ các giá trị ngưỡng từ trang Cài đặt"""
         
         # Ngưỡng vật lý (nội bộ, không đổi)
-        # Giá trị EAR dưới đây là mắt nhắm
         self.INTERNAL_EAR_THRESHOLD = 0.25 
-        # Giá trị MAR trên đây là đang ngáp
         self.INTERNAL_MAR_THRESHOLD = 0.5   
-        # Thời gian (giây) để reset bộ đếm ngáp nếu không ngáp nữa
         self.INTERNAL_YAWN_RESET_TIME_SEC = 60 
         
         # Ngưỡng do người dùng cài đặt (lấy từ giá trị mặc định của SpinBox)
         self.config_yawn_threshold_count = 3  # (lần)
         self.config_eye_time_sec = 2          # (giây)
         self.config_head_angle_deg = 20       # (độ)
-
+        self.config_audio_alert = "Tiếng Bíp (Mặc định)" 
     # --- MỚI ---: Hàm khởi tạo các biến TRẠNG THÁI (state)
     def init_state_vars(self):
         """Reset các biến theo dõi trạng thái (dùng khi bắt đầu/dừng)"""
@@ -133,7 +135,7 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 1. Sidebar (Không thay đổi)
+        # 1. Sidebar
         sidebar = QWidget()
         sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(200)
@@ -142,15 +144,20 @@ class MainWindow(QMainWindow):
         sidebar_layout.setSpacing(15)
         title_label = QLabel("Giám sát Lái xe")
         title_label.setObjectName("SidebarTitle")
+        
         self.menu_giam_sat = QPushButton("Giám sát")
         self.menu_giam_sat.setCursor(Qt.CursorShape.PointingHandCursor)
+        
         self.menu_tai_khoan = QPushButton("Tài khoản")
         self.menu_tai_khoan.setObjectName("MenuButton")
-        self.menu_tai_khoan.setEnabled(False)
+        self.menu_tai_khoan.setEnabled(True) # <-- CẬP NHẬT: Mở khóa
+        self.menu_tai_khoan.setCursor(Qt.CursorShape.PointingHandCursor) # <-- MỚI
+        
         self.btn_cai_dat = QPushButton("Cài đặt cá nhân")
         self.btn_cai_dat.setToolTip("Tùy chỉnh âm thanh và ngưỡng cảnh báo")
         self.btn_cai_dat.setObjectName("SettingsButton_Unselected")
         self.btn_cai_dat.setCursor(Qt.CursorShape.PointingHandCursor)
+        
         sidebar_layout.addWidget(title_label)
         sidebar_layout.addSpacing(20)
         sidebar_layout.addWidget(self.menu_giam_sat)
@@ -159,7 +166,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.btn_cai_dat)
         main_layout.addWidget(sidebar)
 
-        # 2. Main Area (Không thay đổi cấu trúc)
+        # 2. Main Area
         main_area = QWidget()
         main_area.setObjectName("MainArea")
         main_area_layout = QVBoxLayout(main_area)
@@ -167,11 +174,15 @@ class MainWindow(QMainWindow):
         main_area_layout.setSpacing(10)
         self.stacked_widget = QStackedWidget()
         
+        # --- CẬP NHẬT THỨ TỰ INDEX ---
         monitoring_page = self.create_monitoring_page() # Index 0
-        settings_page = self.create_settings_page()     # Index 1
+        account_page = self.create_account_page()       # Index 1 (MỚI)
+        settings_page = self.create_settings_page()     # Index 2 (Dời xuống)
 
         self.stacked_widget.addWidget(monitoring_page)
+        self.stacked_widget.addWidget(account_page)   # <-- THÊM VÀO
         self.stacked_widget.addWidget(settings_page)
+
         main_area_layout.addWidget(self.stacked_widget)
 
         self.status_bar_label = QLabel("Trạng thái: Idle (User: GX6dYP8C63db3jEVACfvmw3uJDH2)")
@@ -181,14 +192,14 @@ class MainWindow(QMainWindow):
         main_area_layout.addWidget(self.status_bar_label)
         main_layout.addWidget(main_area, 1)
 
-        # Kết nối sự kiện (Không thay đổi)
+        # Kết nối sự kiện
         self.btn_bat_dau.clicked.connect(self.start_video)
         self.btn_dung_lai.clicked.connect(self.stop_video)
         self.menu_giam_sat.clicked.connect(self.show_monitoring_page)
+        self.menu_tai_khoan.clicked.connect(self.show_account_page) # <-- MỚI
         self.btn_cai_dat.clicked.connect(self.show_settings_page)
 
     def create_monitoring_page(self):
-        # (Không thay đổi)
         page_widget = QWidget()
         layout = QVBoxLayout(page_widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -213,7 +224,56 @@ class MainWindow(QMainWindow):
         layout.addLayout(control_layout)
         return page_widget
 
-    # --- HÀM create_settings_page (ĐÃ CẬP NHẬT) ---
+    # --- HÀM MỚI ---: Tạo trang Tài khoản
+    def create_account_page(self):
+        """Tạo widget cho trang Tài khoản & Giao diện"""
+        page_widget = QWidget()
+        main_layout = QVBoxLayout(page_widget)
+        main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        form_container = QWidget()
+        form_container.setObjectName("FormContainer")
+        form_container.setMaximumWidth(500)
+        form_layout = QVBoxLayout(form_container)
+        
+        title = QLabel("Tài khoản & Giao diện")
+        title.setObjectName("FormTitle")
+        
+        settings_form = QFormLayout()
+        settings_form.setSpacing(15)
+
+        # 1. Chế độ Giao diện (Theme)
+        self.theme_toggle_cb = QCheckBox("Bật Giao diện Sáng (Light Mode)")
+        self.theme_toggle_cb.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Kết nối chức năng đổi theme
+        self.theme_toggle_cb.toggled.connect(self.toggle_theme) 
+        settings_form.addRow(QLabel("Giao diện:"), self.theme_toggle_cb)
+
+        # 2. Các nút chức năng
+        self.btn_switch_account = QPushButton("CHUYỂN TÀI KHOẢN")
+        self.btn_switch_account.setObjectName("MenuButton") # Dùng style nút menu
+        self.btn_switch_account.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_switch_account.clicked.connect(self.do_switch_account) # Kết nối
+
+        self.btn_logout = QPushButton("ĐĂNG XUẤT")
+        self.btn_logout.setObjectName("StopButton") # Dùng style nút Dừng màu đỏ
+        self.btn_logout.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_logout.clicked.connect(self.do_logout) # Kết nối
+
+        form_layout.addWidget(title)
+        form_layout.addLayout(settings_form)
+        form_layout.addSpacing(20)
+        form_layout.addWidget(self.btn_switch_account)
+        form_layout.addSpacing(10)
+        form_layout.addWidget(self.btn_logout)
+        
+        main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        main_layout.addWidget(form_container)
+        main_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        
+        return page_widget
+
+    # --- HÀM create_settings_page (CẬP NHẬT) ---
     def create_settings_page(self):
         """Tạo widget cho trang Cài đặt cá nhân"""
         page_widget = QWidget()
@@ -234,6 +294,7 @@ class MainWindow(QMainWindow):
         # 1. Âm thanh
         self.audio_alert_combo = QComboBox()
         self.audio_alert_combo.addItems(["Tiếng Bíp (Mặc định)", "Giọng nói cảnh báo", "Tắt âm thanh"])
+        self.audio_alert_combo.setCurrentText(self.config_audio_alert)
         self.audio_alert_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         settings_form.addRow(QLabel("Âm thanh cảnh báo:"), self.audio_alert_combo)
 
@@ -287,24 +348,36 @@ class MainWindow(QMainWindow):
         
         return page_widget
 
-    # --- Các hàm chuyển trang (Không thay đổi) ---
+    # --- Các hàm chuyển trang (ĐÃ CẬP NHẬT) ---
     @Slot()
     def show_monitoring_page(self):
         self.stacked_widget.setCurrentIndex(0)
         self.menu_giam_sat.setObjectName("SelectedMenuButton")
+        self.menu_tai_khoan.setObjectName("MenuButton") # <-- MỚI
+        self.btn_cai_dat.setObjectName("SettingsButton_Unselected")
+        self.refresh_styles()
+
+    @Slot()
+    def show_account_page(self):
+        self.stacked_widget.setCurrentIndex(1) # Index 1 là trang Tài khoản
+        self.menu_giam_sat.setObjectName("MenuButton")
+        self.menu_tai_khoan.setObjectName("SelectedMenuButton") # <-- MỚI
         self.btn_cai_dat.setObjectName("SettingsButton_Unselected")
         self.refresh_styles()
 
     @Slot()
     def show_settings_page(self):
-        self.stacked_widget.setCurrentIndex(1)
+        self.stacked_widget.setCurrentIndex(2) # <-- CẬP NHẬT: Index 2
         self.menu_giam_sat.setObjectName("MenuButton")
+        self.menu_tai_khoan.setObjectName("MenuButton") # <-- MỚI
         self.btn_cai_dat.setObjectName("SettingsButton_Selected")
         self.refresh_styles()
 
     def refresh_styles(self):
         self.style().unpolish(self.menu_giam_sat)
         self.style().polish(self.menu_giam_sat)
+        self.style().unpolish(self.menu_tai_khoan) # <-- MỚI
+        self.style().polish(self.menu_tai_khoan)   # <-- MỚI
         self.style().unpolish(self.btn_cai_dat)
         self.style().polish(self.btn_cai_dat)
 
@@ -342,7 +415,6 @@ class MainWindow(QMainWindow):
 
     @Slot(QImage)
     def update_image(self, qt_img):
-        # (Không thay đổi)
         pixmap = QPixmap.fromImage(qt_img).scaled(
             self.video_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -351,13 +423,25 @@ class MainWindow(QMainWindow):
         self.video_label.setPixmap(pixmap)
 
     def closeEvent(self, event):
-        # (Không thay đổi)
         self.stop_video()
         event.accept()
 
-    # --- HÀM apply_styles (Không thay đổi) ---
+    # --- HÀM apply_styles (ĐÃ TÁCH RA ĐỂ HỖ TRỢ LIGHT/DARK MODE) ---
     def apply_styles(self):
-        style_sheet = """
+        """Hàm điều khiển, gọi QSS phù hợp với theme hiện tại"""
+        if self.current_theme == "light":
+            style_sheet = self.get_light_stylesheet()
+        else:
+            style_sheet = self.get_dark_stylesheet()
+        
+        self.setStyleSheet(style_sheet)
+        
+        # Cập nhật lại style của các nút (quan trọng)
+        self.refresh_styles()
+
+    def get_dark_stylesheet(self):
+        """Trả về QSS cho Giao diện Tối (Dark Mode)"""
+        return """
             /* Nền chung */
             QWidget {
                 background-color: #2c3e50;
@@ -485,7 +569,7 @@ class MainWindow(QMainWindow):
             }
             
             /* Style cho QComboBox, QSlider, QSpinBox */
-            QComboBox {
+            QComboBox, QSpinBox {
                 background-color: #2c3e50;
                 border: 1px solid #7f8c8d;
                 padding: 8px;
@@ -497,15 +581,6 @@ class MainWindow(QMainWindow):
                 background-color: #34495e;
                 border: 1px solid #7f8c8d;
                 selection-background-color: #1abc9c;
-            }
-            
-            QSpinBox {
-                background-color: #2c3e50;
-                border: 1px solid #7f8c8d;
-                padding: 8px;
-                border-radius: 4px;
-                font-size: 14px;
-                color: white;
             }
 
             QSlider::groove:horizontal {
@@ -528,8 +603,194 @@ class MainWindow(QMainWindow):
                 background: #7f8c8d;
                 margin-top: 1px;
             }
+            
+            /* MỚI: Style cho QCheckBox */
+            QCheckBox {
+                font-size: 14px;
+                color: #ecf0f1;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+            }
+            QCheckBox::indicator:unchecked {
+                background-color: #2c3e50;
+                border: 1px solid #7f8c8d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #1abc9c;
+                border: 1px solid #1abc9c;
+            }
         """
-        self.setStyleSheet(style_sheet)
+
+    def get_light_stylesheet(self):
+        """Trả về QSS cho Giao diện Sáng (Light Mode)"""
+        return """
+            /* Nền chung */
+            QWidget {
+                background-color: #ecf0f1;
+                color: #2c3e50;
+                font-family: Arial;
+            }
+
+            /* --- Sidebar --- */
+            QWidget#Sidebar {
+                background-color: #ffffff;
+                border-right: 1px solid #bdc3c7;
+            }
+            QLabel#SidebarTitle {
+                font-size: 16px;
+                font-weight: bold;
+                color: #2c3e50;
+            }
+            QPushButton#MenuButton {
+                background-color: transparent;
+                color: #34495e;
+                border: none;
+                padding: 10px;
+                text-align: left;
+                font-size: 14px;
+            }
+            QPushButton#MenuButton:hover {
+                background-color: #f0f0f0;
+            }
+            QPushButton#MenuButton:disabled {
+                color: #bdc3c7;
+                background-color: transparent;
+            }
+            
+            QPushButton#SelectedMenuButton {
+                background-color: #1abc9c;
+                color: white;
+                border: none;
+                padding: 10px;
+                text-align: left;
+                font-size: 14px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QPushButton#SettingsButton_Unselected {
+                background-color: transparent;
+                color: #34495e;
+                font-weight: bold;
+                padding: 12px 5px;
+                border-radius: 5px;
+                font-size: 13px;
+                border: 1px solid #7f8c8d;
+            }
+            QPushButton#SettingsButton_Unselected:hover {
+                background-color: #f0f0f0;
+            }
+            QPushButton#SettingsButton_Selected {
+                background-color: #1abc9c;
+                color: white;
+                font-weight: bold;
+                padding: 12px 5px;
+                border-radius: 5px;
+                font-size: 13px;
+                border: none;
+            }
+
+            /* --- Main Area --- */
+            QWidget#MainArea {
+                background-color: #ecf0f1;
+            }
+            QLabel#VideoLabel {
+                background-color: #2c3e50;
+                color: #7f8c8d;
+                font-size: 24px;
+                border-radius: 5px;
+            }
+            
+            /* (Giữ nguyên style các nút Start/Stop) */
+            QPushButton#StartButton {
+                background-color: #1abc9c; color: white; font-weight: bold;
+                padding: 12px 20px; border-radius: 5px; font-size: 13px; min-width: 150px;
+            }
+            QPushButton#StartButton:hover { background-color: #16a085; }
+            QPushButton#StopButton {
+                background-color: #e74c3c; color: white; font-weight: bold;
+                padding: 12px 20px; border-radius: 5px; font-size: 13px; min-width: 150px;
+            }
+            QPushButton#StopButton:hover { background-color: #c0392b; }
+            QPushButton#StopButton:disabled { background-color: #bdc3c7; color: #ecf0f1; }
+            
+            QLabel#StatusBar {
+                color: #34495e;
+                font-size: 11px;
+            }
+            
+            /* --- Trang Cài đặt (Form) --- */
+            QWidget#FormContainer {
+                background-color: #ffffff;
+                border-radius: 8px;
+                padding: 20px;
+                border: 1px solid #bdc3c7;
+            }
+            QLabel#FormTitle {
+                font-size: 18px;
+                font-weight: bold;
+                color: #1abc9c;
+                margin-bottom: 10px;
+                text-align: center;
+            }
+            QWidget#FormContainer QLabel {
+                font-size: 14px;
+                color: #2c3e50;
+            }
+            
+            /* Style cho QComboBox, QSlider, QSpinBox */
+            QComboBox, QSpinBox {
+                background-color: #ffffff;
+                border: 1px solid #bdc3c7;
+                padding: 8px;
+                border-radius: 4px;
+                font-size: 14px;
+                color: #2c3e50;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #ffffff;
+                border: 1px solid #bdc3c7;
+                selection-background-color: #1abc9c;
+            }
+
+            QSlider::groove:horizontal {
+                border: 1px solid #bdc3c7;
+                height: 8px;
+                background: #ffffff;
+                margin: 2px 0;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #1abc9c; border: 1px solid #1abc9c;
+                width: 18px; margin: -5px 0; border-radius: 9px;
+            }
+            QSlider::tick:horizontal {
+                height: 10px; width: 2px;
+                background: #bdc3c7;
+                margin-top: 1px;
+            }
+
+            /* MỚI: Style cho QCheckBox */
+            QCheckBox {
+                font-size: 14px;
+                color: #2c3e50;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+            }
+            QCheckBox::indicator:unchecked {
+                background-color: #ffffff;
+                border: 1px solid #bdc3c7;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #1abc9c;
+                border: 1px solid #1abc9c;
+            }
+        """
         
     
     # --- MỚI ---: Hàm lưu cài đặt
@@ -539,13 +800,10 @@ class MainWindow(QMainWindow):
         self.config_yawn_threshold_count = self.yawn_threshold_spinbox.value()
         self.config_eye_time_sec = self.eye_time_spinbox.value()
         self.config_head_angle_deg = self.head_angle_spinbox.value()
-        
-        # (Tùy chọn) Cập nhật độ nhạy từ slider
-        # sensitivity = self.sensitivity_slider.value()
-        # Ví dụ: Điều chỉnh ngưỡng nội bộ dựa trên độ nhạy
-        # self.INTERNAL_EAR_THRESHOLD = 0.25 - (sensitivity - 5) * 0.01 
+        self.config_audio_alert = self.audio_alert_combo.currentText()
         
         print("--- CÀI ĐẶT ĐÃ LƯU ---")
+        print(f"Âm thanh cảnh báo: {self.config_audio_alert}")
         print(f"Ngưỡng ngáp: {self.config_yawn_threshold_count} lần")
         print(f"Ngưỡng nhắm mắt: {self.config_eye_time_sec} giây")
         print(f"Ngưỡng nghiêng đầu: {self.config_head_angle_deg} độ")
@@ -557,6 +815,34 @@ class MainWindow(QMainWindow):
         # Tạo hiệu ứng thông báo ngắn
         QTimer.singleShot(2000, lambda: self.status_bar_label.setText(original_text))
 
+    # --- MỚI ---: Các hàm cho trang Tài khoản
+    @Slot()
+    def do_switch_account(self):
+        print("Chức năng 'Chuyển tài khoản' đã được nhấn.")
+        # TODO: Thêm logic chuyển tài khoản (ví dụ: hiển thị cửa sổ đăng nhập)
+        original_text = self.status_bar_label.text()
+        self.status_bar_label.setText("Trạng thái: Yêu cầu chuyển tài khoản...")
+        QTimer.singleShot(2000, lambda: self.status_bar_label.setText(original_text))
+
+    @Slot()
+    def do_logout(self):
+        print("Chức năng 'Đăng xuất' đã được nhấn.")
+        # TODO: Thêm logic đăng xuất (ví dụ: đóng cửa sổ này, mở đăng nhập)
+        original_text = self.status_bar_label.text()
+        self.status_bar_label.setText("Trạng thái: Đang đăng xuất...")
+        # Ví dụ: Tự động đóng app sau 2s
+        QTimer.singleShot(2000, lambda: self.close()) 
+
+    @Slot(bool)
+    def toggle_theme(self, checked):
+        if checked:
+            self.current_theme = "light"
+            print("Chuyển sang Giao diện Sáng (Light Mode)")
+        else:
+            self.current_theme = "dark"
+            print("Chuyển sang Giao diện Tối (Dark Mode)")
+        
+        self.apply_styles() # Áp dụng lại toàn bộ stylesheet
 
     # --- MỚI ---: Hàm xử lý dữ liệu từ VideoThread
     @Slot(dict)
