@@ -1,11 +1,23 @@
-venv/
-ENV/
-env/
-.venv/
+# --- FILE CẤU HÌNH MẬT (TUYỆT ĐỐI KHÔNG XÓA) ---
+client_secret.json
+session.json
+firebase_config.json
+
+# --- FILE RÁC PYTHON ---
 __pycache__/
-*.py[cod]
-*.pyo
-.DS_Store
-Thumbs.db
+*.pyc
+
+# --- THƯ MỤC LOG & DATA ---
+logs/
+data/
+
+# --- FILE ĐÓNG GÓI EXE (Sau này dùng) ---
+build/
+dist/
+*.spec
+
+# --- MÔI TRƯỜNG ẢO ---
+venv/
+env/
 .idea/
 .vscode/
