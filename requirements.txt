@@ -4,3 +4,6 @@ numpy
 customtkinter
 playsound==1.2.2
 PySide6
+pillow requests
+pyrebase4
+pygame

@@ -6,7 +6,7 @@ Sử dụng PySide6 cho GUI và MediaPipe để xử lý
 import sys
 import cv2
 import time  # --- MỚI ---: Cần để theo dõi thời gian (nhắm mắt, ngáp)
-
+import threading # <--- Thêm dòng này để chạy âm thanh không bị lag
 # --- CẬP NHẬT IMPORT ---
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer 
 from PySide6.QtGui import QImage, QPixmap
@@ -14,9 +14,11 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QFrame, QStackedWidget,
     QFormLayout, QSpacerItem, QSizePolicy,
-    QSlider, QComboBox, QSpinBox, QCheckBox # <-- THÊM QCheckBox
+    QSlider, QComboBox, QSpinBox, QCheckBox, QLineEdit
 )
 
+from modules.sound import SoundModule # <--- Import module phát nhạc có sẵn
+from modules.email_alert import send_alert_email
 # --- MỚI ---: Import FaceProcessor từ file face_processor.py
 try:
     from modules.face_processor import FaceProcessor
@@ -100,6 +102,8 @@ class MainWindow(QMainWindow):
         # --- MỚI ---: Khởi tạo các biến cấu hình và trạng thái
         self.init_config_vars()
         self.init_state_vars()
+        # --- MỚI: Khởi tạo module âm thanh ---
+        self.sound_module = SoundModule()
 
         self.initUI()
         self.apply_styles() # <-- Sẽ áp dụng theme "dark" mặc định
@@ -119,13 +123,52 @@ class MainWindow(QMainWindow):
         self.config_eye_time_sec = 2          # (giây)
         self.config_head_angle_deg = 20       # (độ)
         self.config_audio_alert = "Tiếng Bíp (Mặc định)" 
+        self.config_recipient_email = ""  # Email nhận cảnh báo
     # --- MỚI ---: Hàm khởi tạo các biến TRẠNG THÁI (state)
     def init_state_vars(self):
         """Reset các biến theo dõi trạng thái (dùng khi bắt đầu/dừng)"""
         self.eye_closed_start_time = None
+        # --- MỚI: Biến theo dõi thời gian cho Ngáp và Mất mặt ---
+        self.no_face_start_time = None # Thời điểm bắt đầu mất mặt
+        self.yawn_start_time = None    # Thời điểm bắt đầu mở miệng (ngáp)
         self.is_yawning_state = False # Trạng thái đang ngáp (để đếm 1 lần)
+        self.eye_closed_start_time = None
         self.yawn_count = 0
         self.last_yawn_time = None
+        self.last_sound_time = 0
+        self.last_email_time = 0
+    # --- MỚI: Biến lưu góc lệch của đầu (Calibration) ---
+        # Nếu chưa calibrate thì mặc định là 0
+        if not hasattr(self, 'roll_offset'):
+            self.roll_offset = 0
+
+    # --- LOGIC MỚI: Cân bằng đầu ---
+    @Slot()
+    def calibrate_head_pose(self):
+        """Lấy góc nghiêng hiện tại làm mốc 0"""
+        # Chúng ta cần lấy giá trị roll hiện tại. 
+        # Vì biến roll nằm trong luồng thread, ta sẽ truy cập qua biến tạm hoặc
+        # đơn giản là set flag để lần update sau tự lấy.
+        # Cách đơn giản nhất: Lưu giá trị raw_roll mới nhất vào self
+        if hasattr(self, 'current_raw_roll'):
+            self.roll_offset = self.current_raw_roll
+            self.status_bar_label.setText(f"Đã cân bằng! Góc lệch mới: {self.roll_offset:.1f} độ")
+        else:
+            self.status_bar_label.setText("Chưa nhận diện được khuôn mặt để cân bằng!")
+
+    # --- LOGIC MỚI: Tắt còi thủ công ---
+    @Slot()
+    def manual_stop_alarm(self):
+        """Tắt âm thanh ngay lập tức và reset trạng thái"""
+        # 1. Dừng nhạc
+        self.sound_module.stop_sound()
+        
+        # 2. Reset toàn bộ bộ đếm
+        self.init_state_vars()
+        
+        # 3. Thông báo
+        self.status_bar_label.setText("Trạng thái: Đã tắt còi & Reset hệ thống")
+        print("Người dùng đã tắt cảnh báo thủ công.")
 
     def initUI(self):
         central_widget = QWidget(self)
@@ -209,6 +252,24 @@ class MainWindow(QMainWindow):
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setMinimumSize(640, 480)
         layout.addWidget(self.video_label, 1)
+        # --- MỚI: Hàng nút chức năng phụ ---
+        tools_layout = QHBoxLayout()
+        
+        # Nút Cân bằng đầu (Fix lỗi nghiêng đầu)
+        self.btn_calibrate = QPushButton("Cân bằng vị trí đầu")
+        self.btn_calibrate.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_calibrate.setStyleSheet("background-color: #3498db; color: white; padding: 8px;")
+        self.btn_calibrate.clicked.connect(self.calibrate_head_pose)
+        
+        # Nút Tắt còi khẩn cấp (Fix lỗi kêu mãi)
+        self.btn_stop_alarm = QPushButton("🔕 TẮT CÒI / RESET")
+        self.btn_stop_alarm.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_stop_alarm.setStyleSheet("background-color: #f1c40f; color: black; font-weight: bold; padding: 8px;")
+        self.btn_stop_alarm.clicked.connect(self.manual_stop_alarm)
+        
+        tools_layout.addWidget(self.btn_calibrate)
+        tools_layout.addWidget(self.btn_stop_alarm)
+        layout.addLayout(tools_layout)
         control_layout = QHBoxLayout()
         self.btn_bat_dau = QPushButton("BẮT ĐẦU GIÁM SÁT")
         self.btn_bat_dau.setObjectName("StartButton")
@@ -291,6 +352,12 @@ class MainWindow(QMainWindow):
         settings_form = QFormLayout()
         settings_form.setSpacing(15)
 
+# --- MỚI: Ô nhập Email người thân ---
+        self.email_input = QLineEdit()
+        self.email_input.setPlaceholderText("Ví dụ: nguoi_than@gmail.com")
+        self.email_input.setText(self.config_recipient_email) # Hiển thị email cũ nếu có
+        self.email_input.setStyleSheet("background-color: #ffffff; color: #2c3e50; padding: 8px; border-radius: 4px;")
+        settings_form.addRow(QLabel("Email người thân:"), self.email_input)
         # 1. Âm thanh
         self.audio_alert_combo = QComboBox()
         self.audio_alert_combo.addItems(["Tiếng Bíp (Mặc định)", "Giọng nói cảnh báo", "Tắt âm thanh"])
@@ -801,6 +868,11 @@ class MainWindow(QMainWindow):
         self.config_eye_time_sec = self.eye_time_spinbox.value()
         self.config_head_angle_deg = self.head_angle_spinbox.value()
         self.config_audio_alert = self.audio_alert_combo.currentText()
+        # --- MỚI: Lưu email ---
+        self.config_recipient_email = self.email_input.text().strip()
+        
+        print("--- CÀI ĐẶT ĐÃ LƯU ---")
+        print(f"Email người nhận: {self.config_recipient_email}")
         
         print("--- CÀI ĐẶT ĐÃ LƯU ---")
         print(f"Âm thanh cảnh báo: {self.config_audio_alert}")
@@ -844,90 +916,157 @@ class MainWindow(QMainWindow):
         
         self.apply_styles() # Áp dụng lại toàn bộ stylesheet
 
+# --- HÀM MỚI: Xử lý phát âm thanh cảnh báo ---
+    def trigger_warning_sound(self, sound_file, cooldown=3.0, loop=False):
+        """Phát âm thanh cụ thể"""
+        if self.config_audio_alert == "Tắt âm thanh":
+            return
+        current_time = time.time()
+        # Nếu chưa đủ thời gian chờ từ lần phát trước -> Bỏ qua
+        # Nếu đang báo động nguy hiểm (loop=True) thì bỏ qua cooldown
+        if not loop and (current_time - self.last_sound_time < cooldown):
+            return
+
+        # Cập nhật thời gian phát mới
+        self.last_sound_time = current_time
+        # Gọi hàm bên module sound (đã có threading bên đó rồi)
+        self.sound_module.play_sound(sound_file, loop=loop)
+        
     # --- MỚI ---: Hàm xử lý dữ liệu từ VideoThread
     @Slot(dict)
     def handle_detection_data(self, data):
-        """
-        Đây là "bộ não" của ứng dụng.
-        Nhận dữ liệu (EAR, MAR, Roll) và kích hoạt cảnh báo.
-        """
+        current_time = time.time()
+        status_messages = []
+
+        # === 1. Xử lý: KHÔNG TÌM THẤY KHUÔN MẶT ===
         if not data["face_found"]:
-            self.status_bar_label.setText("Trạng thái: Không tìm thấy khuôn mặt...")
-            # Reset trạng thái nếu mất mặt
-            self.init_state_vars() 
+            if self.no_face_start_time is None:
+                self.no_face_start_time = current_time
+            else:
+                no_face_duration = current_time - self.no_face_start_time
+                
+                # Cấp độ 2: Mất mặt > 3s -> NGUY HIỂM (Kêu dồn dập mỗi 2s)
+                if no_face_duration > 3:
+                    self.status_bar_label.setText(f"NGUY HIỂM: KHÔNG THẤY TÀI XẾ ({no_face_duration:.1f}s)")
+                    self.trigger_warning_sound("alarm_danger.mp3", cooldown=2.0, loop=True)
+                    # --- [GỬI EMAIL] ---
+                    self.trigger_alert_email(
+                        subject="[CẢNH BÁO KHẨN] Mất tín hiệu tài xế!",
+                        message=f"Hệ thống không thấy tài xế trong {no_face_duration:.1f} giây. Vui lòng kiểm tra ngay."
+                    )
+                    # Reset các timer khác để tránh xung đột
+                    self.eye_closed_start_time = None
+                    self.yawn_start_time = None
+                    return # Thoát luôn để ưu tiên cảnh báo này
+                else:
+                    self.status_bar_label.setText(f"Cảnh báo: Mất tín hiệu khuôn mặt ({no_face_duration:.1f}s)")
+            return
+        else:
+            self.no_face_start_time = None
+
+        # Lấy dữ liệu
+        ear = data["ear"]
+        mar = data["mar"]
+        raw_roll = data["roll"]
+        # Lưu raw_roll để dùng cho nút Cân bằng
+        self.current_raw_roll = raw_roll
+        # Tính roll thực tế sau khi trừ đi góc lệch (offset)
+        roll = raw_roll - self.roll_offset
+
+        # === 2. Xử lý: NHẮM MẮT (EAR) ===
+        if ear < self.INTERNAL_EAR_THRESHOLD:
+            if self.eye_closed_start_time is None:
+                self.eye_closed_start_time = current_time
+            else:
+                eye_duration = current_time - self.eye_closed_start_time
+                
+                if eye_duration > 5: # NGUY HIỂM
+                    msg = f"NGUY HIỂM: NHẮM MẮT ({eye_duration:.1f}s)"
+                    status_messages.append(msg)
+                    # Ưu tiên cao nhất, cooldown ngắn (2s)
+                    self.trigger_warning_sound("alarm_danger.mp3", cooldown=2.0, loop=True)
+                    # --- [GỬI EMAIL] ---
+                    self.trigger_alert_email(
+                        subject="[CẢNH BÁO KHẨN] Tài xế ngủ gật!",
+                        message=f"Tài xế đã nhắm mắt quá {eye_duration:.1f} giây. Nguy cơ tai nạn cao."
+                    )
+                elif eye_duration > self.config_eye_time_sec: # Cảnh báo thường
+                    msg = f"Buồn ngủ ({eye_duration:.1f}s)"
+                    status_messages.append(msg)
+                    # Cảnh báo thường, cooldown dài hơn (3s)
+                    self.trigger_warning_sound("warning_eye.mp3", cooldown=3.0)
+        else:
+            self.eye_closed_start_time = None
+
+        # === 3. Xử lý: NGÁP (MAR) ===
+        if mar > self.INTERNAL_MAR_THRESHOLD:
+            if self.yawn_start_time is None:
+                self.yawn_start_time = current_time
+            else:
+                yawn_duration = current_time - self.yawn_start_time
+                
+                if yawn_duration > 5: # NGUY HIỂM
+                    msg = f"NGUY HIỂM: NGÁP DÀI ({yawn_duration:.1f}s)"
+                    status_messages.append(msg)
+                    self.trigger_warning_sound("alarm_eye.mp3", cooldown=2.0, loop=True)
+                
+                # Logic đếm số lần ngáp (giữ nguyên như cũ)
+                if not self.is_yawning_state:
+                    self.is_yawning_state = True
+                    self.yawn_count += 1
+                    # # Phát tiếng ngáp 1 lần duy nhất khi bắt đầu mở miệng
+                    # self.trigger_warning_sound("warning_eye.mp3", cooldown=3.0)
+        else:
+            self.is_yawning_state = False
+            self.yawn_start_time = None
+
+        if self.yawn_count >= self.config_yawn_threshold_count:
+             status_messages.append(f"Đã ngáp {self.yawn_count} lần")
+
+        # === 4. Xử lý: NGHIÊNG ĐẦU ===
+        if abs(roll) > self.config_head_angle_deg:
+            msg = f"Nghiêng đầu ({roll:.0f} độ)"
+            status_messages.append(msg)
+            self.trigger_warning_sound("warning_eye.mp3", cooldown=3.0)
+
+        # === 5. Hiển thị Status Bar ===
+        if not status_messages:
+            self.status_bar_label.setText("Trạng thái: Đang theo dõi... (An toàn)")
+            self.status_bar_label.setStyleSheet("color: #95a5a6") 
+        else:
+            text = " | ".join(status_messages)
+            self.status_bar_label.setText("⚠️ " + text)
+            if "NGUY HIỂM" in text:
+                self.status_bar_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+            else:
+                self.status_bar_label.setStyleSheet("color: #f39c12; font-weight: bold;")
+
+    def trigger_alert_email(self, subject, message):
+        """Gửi email cảnh báo đến người thân"""
+        
+        # 1. Kiểm tra xem đã nhập email người nhận chưa
+        if not self.config_recipient_email:
+            print("⚠️ Chưa nhập email người thân trong Cài đặt -> Không gửi mail.")
             return
 
         current_time = time.time()
-        ear = data["ear"]
-        mar = data["mar"]
-        roll = data["roll"]
-
-        status_messages = [] # Danh sách các cảnh báo
-
-        # === 1. Xử lý Nghiêng đầu (Đơn giản nhất) ===
-        if abs(roll) > self.config_head_angle_deg:
-            msg = f"CẢNH BÁO: NGHIÊNG ĐẦU ({roll:.0f} độ)"
-            status_messages.append(msg)
-            # TODO: Phát âm thanh cảnh báo
-
-        # === 2. Xử lý Nhắm mắt (EAR) ===
-        if ear < self.INTERNAL_EAR_THRESHOLD:
-            # Mắt đang nhắm
-            if self.eye_closed_start_time is None:
-                # Bắt đầu đếm
-                self.eye_closed_start_time = current_time
-            else:
-                # Đã nhắm được 1 lúc, kiểm tra thời gian
-                duration = current_time - self.eye_closed_start_time
-                if duration > self.config_eye_time_sec:
-                    # Vượt ngưỡng
-                    msg = f"CẢNH BÁO: BUỒN NGỦ (Nhắm {duration:.1f}s)"
-                    status_messages.append(msg)
-                    # TODO: Phát âm thanh cảnh báo
-                else:
-                    # Đang nhắm nhưng chưa đủ lâu
-                    status_messages.append(f"Nhắm mắt {duration:.1f}s...")
-        else:
-            # Mắt đang mở, reset bộ đếm
-            self.eye_closed_start_time = None
-
-        # === 3. Xử lý Ngáp (MAR) ===
         
-        # Reset bộ đếm ngáp sau 1 phút không ngáp
-        if self.last_yawn_time and (current_time - self.last_yawn_time > self.INTERNAL_YAWN_RESET_TIME_SEC):
-            self.yawn_count = 0
-            self.last_yawn_time = None
+        # 2. Chặn Spam (60s mới gửi 1 lần)
+        EMAIL_COOLDOWN = 60 
+        if current_time - self.last_email_time < EMAIL_COOLDOWN:
+            return
+
+        self.last_email_time = current_time
+        recipient = self.config_recipient_email # Lấy từ cài đặt
+
+        print(f"📧 Đang gửi email tới: {recipient}")
         
-        if mar > self.INTERNAL_MAR_THRESHOLD:
-            # Miệng đang mở (đủ lớn để coi là ngáp)
-            if not self.is_yawning_state:
-                # Đây là frame đầu tiên của hành động ngáp -> đếm 1 lần
-                self.is_yawning_state = True
-                self.yawn_count += 1
-                self.last_yawn_time = current_time # Cập nhật thời điểm ngáp cuối
-        else:
-            # Miệng đã đóng lại, reset trạng thái "đang ngáp"
-            self.is_yawning_state = False
-
-        # Hiển thị số lần ngáp nếu > 0
-        if self.yawn_count > 0:
-            msg = f"Đã ngáp: {self.yawn_count} lần"
-            status_messages.append(msg)
-
-        # Kiểm tra nếu vượt ngưỡng ngáp
-        if self.yawn_count >= self.config_yawn_threshold_count:
-            msg = f"CẢNH BÁO: MỆT MỎI (Ngáp {self.yawn_count} lần)"
-            status_messages.append(msg)
-            # TODO: Phát âm thanh cảnh báo
-
-        # === 4. Cập nhật Status Bar ===
-        if not status_messages:
-            self.status_bar_label.setText("Trạng thái: Đang theo dõi... (Bình thường)")
-        else:
-            # Nối tất cả các cảnh báo lại
-            self.status_bar_label.setText("Trạng thái: " + " | ".join(status_messages))
-
-
+        # 3. Gửi trong luồng riêng
+        def _send():
+            success = send_alert_email(recipient, subject, message)
+            # Log kết quả ra console nếu cần
+                
+        threading.Thread(target=_send, daemon=True).start()
 # --- Chạy ứng dụng ---
 if __name__ == "__main__":
     app = QApplication(sys.argv)
